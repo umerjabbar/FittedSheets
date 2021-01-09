@@ -384,47 +384,55 @@ public class SheetViewController: UIViewController {
             newHeight = maxHeight
         }
         
+        var newCornerRadius = self.cornerRadius
+        if let parentHeight = UIApplication.shared.windows.first?.frame.height, newHeight >= parentHeight {
+            newCornerRadius = 0
+        }else{
+            newCornerRadius = self.cornerRadius
+        }
+        
         switch gesture.state {
-            case .cancelled, .failed:
-                UIView.animate(withDuration: options.transitionDuration, delay: 0, options: [.curveEaseOut], animations: {
-                    self.contentViewController.view.transform = CGAffineTransform.identity
-                    self.contentViewHeightConstraint.constant = self.height(for: self.currentSize)
-                    self.transition.setPresentor(percentComplete: 0)
-                    self.overlayView.alpha = 1
-                }, completion: { _ in
-                    self.isPanning = false
-                })
+        case .cancelled, .failed:
+            UIView.animate(withDuration: options.transitionDuration, delay: 0, options: [.curveEaseOut], animations: {
+                self.contentViewController.view.transform = CGAffineTransform.identity
+                self.contentViewHeightConstraint.constant = self.height(for: self.currentSize)
+                self.contentViewController.cornerRadius = self.getCornerRadius(for: self.currentSize)
+                self.transition.setPresentor(percentComplete: 0)
+                self.overlayView.alpha = 1
+            }, completion: { _ in
+                self.isPanning = false
+            })
             
-            case .began, .changed:
-                self.contentViewHeightConstraint.constant = newHeight
-                
-                if offset > 0 {
-                    let percent = max(0, min(1, offset / max(1, newHeight)))
-                    self.transition.setPresentor(percentComplete: percent)
-                    self.overlayView.alpha = 1 - percent
-                    self.contentViewController.view.transform = CGAffineTransform(translationX: 0, y: offset)
-                } else {
-                    self.contentViewController.view.transform = CGAffineTransform.identity
-                }
-            case .ended:
-                let velocity = (0.2 * gesture.velocity(in: self.view).y)
-                var finalHeight = newHeight - offset - velocity
-                if velocity > 500 {
-                    // They swiped hard, always just close the sheet when they do
-                    finalHeight = -1
-                }
-                
-                let animationDuration = TimeInterval(abs(velocity*0.0002) + 0.2)
-                
-                guard finalHeight > 0 || !self.dismissOnPull else {
-                    // Dismiss
-                    UIView.animate(
-                        withDuration: animationDuration,
-                        delay: 0,
-                        usingSpringWithDamping: self.options.transitionDampening,
-                        initialSpringVelocity: self.options.transitionVelocity,
-                        options: self.options.transitionAnimationOptions,
-                        animations: {
+        case .began, .changed:
+            self.contentViewHeightConstraint.constant = newHeight
+            
+            if offset > 0 {
+                let percent = max(0, min(1, offset / max(1, newHeight)))
+                self.transition.setPresentor(percentComplete: percent)
+                self.overlayView.alpha = 1 - percent
+                self.contentViewController.view.transform = CGAffineTransform(translationX: 0, y: offset)
+            } else {
+                self.contentViewController.view.transform = CGAffineTransform.identity
+            }
+        case .ended:
+            let velocity = (0.2 * gesture.velocity(in: self.view).y)
+            var finalHeight = newHeight - offset - velocity
+            if velocity > 500 {
+                // They swiped hard, always just close the sheet when they do
+                finalHeight = -1
+            }
+            
+            let animationDuration = TimeInterval(abs(velocity*0.0002) + 0.2)
+            
+            guard finalHeight > 0 || !self.dismissOnPull else {
+                // Dismiss
+                UIView.animate(
+                    withDuration: animationDuration,
+                    delay: 0,
+                    usingSpringWithDamping: self.options.transitionDampening,
+                    initialSpringVelocity: self.options.transitionVelocity,
+                    options: self.options.transitionAnimationOptions,
+                    animations: {
                         self.contentViewController.view.transform = CGAffineTransform(translationX: 0, y: self.contentViewController.view.bounds.height)
                         self.view.backgroundColor = UIColor.clear
                         self.transition.setPresentor(percentComplete: 1)
@@ -432,8 +440,8 @@ public class SheetViewController: UIViewController {
                     }, completion: { complete in
                         self.attemptDismiss(animated: false)
                     })
-                    return
-                }
+                return
+            }
                 
                 var newSize = self.currentSize
                 if point.y < 0 {
@@ -468,13 +476,14 @@ public class SheetViewController: UIViewController {
                     initialSpringVelocity: self.options.transitionVelocity,
                     options: self.options.transitionAnimationOptions,
                     animations: {
-                    self.contentViewController.view.transform = CGAffineTransform.identity
-                    self.contentViewHeightConstraint.constant = newContentHeight
-                    self.transition.setPresentor(percentComplete: 0)
-                    self.overlayView.alpha = 1
-                    self.view.layoutIfNeeded()
-                }, completion: { complete in
-                    self.isPanning = false
+                        self.contentViewController.view.transform = CGAffineTransform.identity
+                        self.contentViewHeightConstraint.constant = newContentHeight
+                        self.contentViewController.cornerRadius = self.getCornerRadius(for: self.currentSize)
+                        self.transition.setPresentor(percentComplete: 0)
+                        self.overlayView.alpha = 1
+                        self.view.layoutIfNeeded()
+                    }, completion: { complete in
+                        self.isPanning = false
                     if previousSize != newSize {
                         self.sizeChanged?(self, newSize, newContentHeight)
                     }
@@ -542,6 +551,15 @@ public class SheetViewController: UIViewController {
         return min(fullscreenHeight, contentHeight)
     }
     
+    private func getCornerRadius(for size: SheetSize) -> CGFloat{
+        switch size {
+        case .fullscreen:
+            return 0
+        default:
+            return SheetViewController.cornerRadius
+        }
+    }
+    
     public func resize(to size: SheetSize,
                        duration: TimeInterval = 0.4,
                        options: UIView.AnimationOptions = [.curveEaseOut],
@@ -554,6 +572,7 @@ public class SheetViewController: UIViewController {
         let oldConstraintHeight = self.contentViewHeightConstraint.constant
         
         let newHeight = self.height(for: size)
+        let newCornerRadius = self.getCornerRadius(for: size)
         
         guard oldConstraintHeight != newHeight else {
             return
@@ -563,6 +582,7 @@ public class SheetViewController: UIViewController {
             UIView.animate(withDuration: duration, delay: 0, options: options, animations: { [weak self] in
                 guard let self = self, let constraint = self.contentViewHeightConstraint else { return }
                 constraint.constant = newHeight
+                self.contentViewController.cornerRadius = newCornerRadius
                 self.view.layoutIfNeeded()
             }, completion: { _ in
                 if previousSize != size {
@@ -574,6 +594,7 @@ public class SheetViewController: UIViewController {
         } else {
             UIView.performWithoutAnimation {
                 self.contentViewHeightConstraint?.constant = self.height(for: size)
+                self.contentViewController.cornerRadius = newCornerRadius
                 self.contentViewController.view.layoutIfNeeded()
             }
             complete?()
