@@ -386,7 +386,7 @@ public class SheetViewController: UIViewController {
         
         switch gesture.state {
             case .cancelled, .failed:
-                UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut], animations: {
+                UIView.animate(withDuration: options.transitionDuration, delay: 0, options: [.curveEaseOut], animations: {
                     self.contentViewController.view.transform = CGAffineTransform.identity
                     self.contentViewHeightConstraint.constant = self.height(for: self.currentSize)
                     self.transition.setPresentor(percentComplete: 0)
@@ -543,7 +543,7 @@ public class SheetViewController: UIViewController {
     }
     
     public func resize(to size: SheetSize,
-                       duration: TimeInterval = 0.2,
+                       duration: TimeInterval = 0.4,
                        options: UIView.AnimationOptions = [.curveEaseOut],
                        animated: Bool = true,
                        complete: (() -> Void)? = nil) {
@@ -599,7 +599,7 @@ public class SheetViewController: UIViewController {
     }
     
     /// Animates the sheet in, but only if presenting using the inline mode
-    public func animateIn(duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) {
+    public func animateIn(duration: TimeInterval = 0.4, completion: (() -> Void)? = nil) {
         guard self.options.useInlineMode else { return }
         self.view.superview?.layoutIfNeeded()
         self.contentViewController.updatePreferredHeight()
@@ -622,7 +622,7 @@ public class SheetViewController: UIViewController {
     }
     
     /// Animates the sheet out, but only if presenting using the inline mode
-    public func animateOut(duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) {
+    public func animateOut(duration: TimeInterval = 0.4, completion: (() -> Void)? = nil) {
         guard self.options.useInlineMode else { return }
         let contentView = self.contentViewController.contentView
         
