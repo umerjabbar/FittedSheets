@@ -148,6 +148,29 @@ sheetController.allowGestureThroughOverlay = true
 sheetController.animateIn(to: view, in: self)
 ```
 
+## Overlay pass-through with modal-style presentation
+
+`allowGestureThroughOverlay` lets touches over the dimmed area outside the sheet reach the app behind it. Standard modal presentation (`present(_:animated:)`) cannot do this, because UIKit's presentation container intercepts those touches. To get pass-through with a modal-style sheet, present it over the window instead:
+
+```swift
+let sheet = SheetViewController(controller: MyViewController(), sizes: [.percent(0.4)])
+sheet.allowGestureThroughOverlay = true
+
+// Instead of self.present(sheet, animated: true):
+sheet.presentOverWindow()
+```
+
+The sheet is attached over the key window as a sibling of the app content, so overlay-region touches pass straight through while the sheet itself stays interactive. Dismissal (overlay tap, pull-down, `attemptDismiss`) works as usual. In plain inline mode (`animateIn(to:in:)`) pass-through already works.
+
+## Liquid Glass background (iOS 26+)
+
+When `hasBlurBackground` is enabled, the background can render with a Liquid Glass (`UIGlassEffect`) material on iOS 26 and later. It is opt-in and defaults to off (the classic `UIBlurEffect` is used), so existing appearance is unchanged:
+
+```swift
+sheet.hasBlurBackground = true
+sheet.useLiquidGlassBackground = true   // iOS 26+; no effect on earlier versions
+```
+
 ## Scrolling
 
 ```swift
