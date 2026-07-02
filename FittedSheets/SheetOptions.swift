@@ -6,11 +6,11 @@
 //  Copyright © 2020 Gordon Tucker. All rights reserved.
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
 
 public struct SheetOptions {
-    public static var `default` = SheetOptions()
+    nonisolated(unsafe) public static var `default` = SheetOptions(bootstrap: ())
     
     public enum TransitionOverflowType {
         case color(color: UIColor)
@@ -33,9 +33,16 @@ public struct SheetOptions {
     public var transitionOverflowType: TransitionOverflowType = .automatic
     
     /// Default value 500, greater value will require more velocity to dismiss. Lesser values will do opposite.
-    public var pullDismissThreshod: CGFloat = 500.0
+    public var pullDismissThreshold: CGFloat = 500.0
+
+    /// Deprecated misspelled alias. Use `pullDismissThreshold` instead.
+    @available(*, deprecated, renamed: "pullDismissThreshold")
+    public var pullDismissThreshod: CGFloat {
+        get { pullDismissThreshold }
+        set { pullDismissThreshold = newValue }
+    }
     
-    /// Allow the sheet to become full screen if pulled all the way to the top and not larger than the maximum size specified in sizes. Defaults to false.
+    /// Allow the sheet to become full screen if pulled all the way to the top and not larger than the maximum size specified in sizes. Defaults to true.
     public var useFullScreenMode = true
     public var shrinkPresentingViewController = true
     /// Set true to be able to use the sheet view controller as a subview instead of a modal. Defaults to false.
@@ -43,34 +50,28 @@ public struct SheetOptions {
     
     public var horizontalPadding: CGFloat = 0
     public var maxWidth: CGFloat?
-    
-    /* These properties will be removed in an upcoming release, leaving them for now so people can transition slowly */
-    
-    //@available(*, unavailable, message: "minimumSpaceAbovePullBar is now a property on SheetViewController")
-    public var minimumSpaceAbovePullBar: CGFloat = 0
-    
-    //@available(*, unavailable, message: "gripSize is now a property on SheetViewController")
-    public var gripSize: CGSize = .zero
-    
-    //@available(*, unavailable, message: "gripColor is now a property on SheetViewController")
-    public var gripColor: UIColor = .white
-    
-    //@available(*, unavailable, message: "pullBarBackgroundColor is now a property on SheetViewController")
-    public var pullBarBackgroundColor: UIColor = UIColor.clear
-    
-    //@available(*, unavailable, message: "cornerRadius is now a property on SheetViewController")
-    public var cornerRadius: CGFloat = 0
 
     public var isRubberBandEnabled: Bool = false
     
     /// Experimental flag that attempts to shrink the nested presentations more each time a new sheet is presented. This must be set before any sheet is presented.
-    public static var shrinkingNestedPresentingViewControllers = false
+    nonisolated(unsafe) public static var shrinkingNestedPresentingViewControllers = false
     
-    public init() { }
+    /// Bootstraps `.default` with the compiled-in stock values WITHOUT reading
+    /// `.default` (doing so would recurse/deadlock during static initialization).
+    private init(bootstrap: Void) { }
+
+    /// Inherits the app-wide `SheetOptions.default`, matching the parameterized init.
+    public init() { self = SheetOptions.default }
     public init(pullBarHeight: CGFloat? = nil,
                 presentingViewCornerRadius: CGFloat? = nil,
                 shouldExtendBackground: Bool? = nil,
                 setIntrinsicHeightOnNavigationControllers: Bool? = nil,
+                transitionAnimationOptions: UIView.AnimationOptions? = nil,
+                transitionDampening: CGFloat? = nil,
+                transitionDuration: TimeInterval? = nil,
+                transitionVelocity: CGFloat? = nil,
+                transitionOverflowType: TransitionOverflowType? = nil,
+                pullDismissThreshold: CGFloat? = nil,
                 useFullScreenMode: Bool? = nil,
                 shrinkPresentingViewController: Bool? = nil,
                 useInlineMode: Bool? = nil,
@@ -82,13 +83,19 @@ public struct SheetOptions {
         self.presentingViewCornerRadius = presentingViewCornerRadius ?? defaultOptions.presentingViewCornerRadius
         self.shouldExtendBackground = shouldExtendBackground ?? defaultOptions.shouldExtendBackground
         self.setIntrinsicHeightOnNavigationControllers = setIntrinsicHeightOnNavigationControllers ?? defaultOptions.setIntrinsicHeightOnNavigationControllers
+        self.transitionAnimationOptions = transitionAnimationOptions ?? defaultOptions.transitionAnimationOptions
+        self.transitionDampening = transitionDampening ?? defaultOptions.transitionDampening
+        self.transitionDuration = transitionDuration ?? defaultOptions.transitionDuration
+        self.transitionVelocity = transitionVelocity ?? defaultOptions.transitionVelocity
+        self.transitionOverflowType = transitionOverflowType ?? defaultOptions.transitionOverflowType
+        self.pullDismissThreshold = pullDismissThreshold ?? defaultOptions.pullDismissThreshold
         self.useFullScreenMode = useFullScreenMode ?? defaultOptions.useFullScreenMode
         self.shrinkPresentingViewController = shrinkPresentingViewController ?? defaultOptions.shrinkPresentingViewController
         self.useInlineMode = useInlineMode ?? defaultOptions.useInlineMode
         self.horizontalPadding = horizontalPadding ?? defaultOptions.horizontalPadding
         let maxWidth = maxWidth ?? defaultOptions.maxWidth
         self.maxWidth = maxWidth == 0 ? nil : maxWidth
-        self.isRubberBandEnabled = isRubberBandEnabled ?? false
+        self.isRubberBandEnabled = isRubberBandEnabled ?? defaultOptions.isRubberBandEnabled
     }
     
     @available(*, unavailable, message: "cornerRadius, minimumSpaceAbovePullBar, gripSize and gripColor are now properties on SheetViewController. Use them instead.")
@@ -114,4 +121,4 @@ public struct SheetOptions {
     }
 }
 
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)

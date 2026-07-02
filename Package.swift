@@ -1,4 +1,4 @@
-// swift-tools-version:5.2
+// swift-tools-version: 6.0
 //
 //  Package.swift
 //  FittedSheets
@@ -11,8 +11,9 @@ import PackageDescription
 
 let package = Package(
     name: "FittedSheets",
+    defaultLocalization: "en",
     platforms: [
-        .iOS(.v10), .tvOS(.v10), .macOS(.v10_12), .watchOS(.v3)
+        .iOS(.v15)
     ],
     products: [
         .library(name: "FittedSheets", targets: ["FittedSheets"]),
@@ -20,5 +21,5 @@ let package = Package(
     targets: [
         .target(name: "FittedSheets", path: "FittedSheets"),
     ],
-    swiftLanguageVersions: [.v5]
+    swiftLanguageModes: [.v6]
 )

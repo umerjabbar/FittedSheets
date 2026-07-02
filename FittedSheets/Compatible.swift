@@ -1,55 +1,21 @@
 //
-//  File.swift
-//
-//
-//  Created by Nhuan Vu on 8/25/21.
+//  Compatible.swift
+//  FittedSheets
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
 
-extension UIView {
-    public var compatibleSafeAreaInsets: UIEdgeInsets {
-        if #available(iOS 11.0, *) {
-            return self.safeAreaInsets
-        } else {
-            return .zero
-        }
+extension UIApplication {
+    /// The key window across all connected scenes, preferring a foreground-active scene.
+    /// Replaces the deprecated `UIApplication.keyWindow` / `UIApplication.windows` key-window scans.
+    var fs_keyWindow: UIWindow? {
+        let scenes = connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeWindows = scenes.filter { $0.activationState == .foregroundActive }.flatMap { $0.windows }
+        return activeWindows.first(where: { $0.isKeyWindow })
+            ?? scenes.flatMap { $0.windows }.first(where: { $0.isKeyWindow })
+            ?? activeWindows.first
     }
 }
 
-extension CALayer {
-    public var compatibleMaskedCorners: CACornerMask {
-        get {
-            if #available(iOS 11.0, *) {
-                return self.maskedCorners
-            } else {
-                return []
-            }
-        }
-        set {
-            if #available(iOS 11.0, *) {
-                self.maskedCorners = newValue
-            }
-        }
-    }
-}
-
-extension UIViewController {
-    public var compatibleAdditionalSafeAreaInsets: UIEdgeInsets {
-        get {
-            if #available(iOS 11.0, *) {
-                return self.additionalSafeAreaInsets
-            } else {
-                return .zero
-            }
-        }
-        set {
-            if #available(iOS 11.0, *) {
-                self.additionalSafeAreaInsets = newValue
-            }
-        }
-    }
-}
-
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)

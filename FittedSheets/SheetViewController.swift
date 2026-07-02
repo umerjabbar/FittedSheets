@@ -6,8 +6,37 @@
 //  Copyright © 2020 Gordon Tucker. All rights reserved.
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
+
+/// A snapshot of the sheet's live progress across its defined detents, computed by the library and
+/// delivered every frame the height moves (see `SheetViewController.progressChanged`). Consumers use
+/// it to drive progressive/interactive content without needing to know the detent heights themselves.
+public struct SheetHeightProgress {
+    /// One entry per defined detent, ordered smallest → largest by height.
+    public struct Step {
+        /// The detent this step represents.
+        public let size: SheetSize
+        /// The detent's current content height, in points.
+        public let height: CGFloat
+        /// Progress of the segment leading up to this detent, 0…1: it stays 0 until the sheet leaves
+        /// the previous detent, ramps to 1 across the gap, and remains 1 once the height passes this
+        /// detent. The smallest detent's `reveal` is always 1. Drive content that "unlocks" at a
+        /// given detent from `steps[i].reveal`.
+        public let reveal: CGFloat
+    }
+
+    /// The live on-screen content height, in points.
+    public let height: CGFloat
+    /// Overall progress across all detents: 0 at the smallest detent, 1 at the largest. Clamped.
+    public let fraction: CGFloat
+    /// The largest detent the sheet has currently reached (its height ≤ `height`).
+    public let reachedSize: SheetSize
+    /// Index of `reachedSize` within `steps`.
+    public let reachedIndex: Int
+    /// Per-detent progress, smallest → largest.
+    public let steps: [Step]
+}
 
 public class SheetViewController: UIViewController {
     public private(set) var options: SheetOptions
@@ -35,6 +64,13 @@ public class SheetViewController: UIViewController {
     }
     public var orderedSizes: [SheetSize] = []
     public private(set) var currentSize: SheetSize = .intrinsic
+
+    /// Duration of the smooth animation used when the sheet auto-resizes to fit an intrinsic
+    /// content-height change. Defaults to a gentle 0.35s (vs. the snappier detent-snap timing).
+    public var intrinsicTransitionDuration: TimeInterval = 0.35
+    /// Spring damping for the intrinsic auto-resize: 1 = no overshoot, lower adds spring.
+    /// Defaults to 0.9 for a smooth, non-snappy settle.
+    public var intrinsicTransitionDampening: CGFloat = 0.9
     /// Allows dismissing of the sheet by pulling down
     public var dismissOnPull: Bool = true {
         didSet {
@@ -49,6 +85,11 @@ public class SheetViewController: UIViewController {
    }
     /// If true you can pull using UIControls (so you can grab and drag a button to control the sheet)
     public var shouldRecognizePanGestureWithUIControls: Bool = true
+
+    /// When a registered child scroll view is scrolled to its top edge, whether continuing to pull
+    /// up expands the sheet toward its largest detent (true, default) or lets the content scroll
+    /// (false). Parity with `UISheetPresentationController.prefersScrollingExpandsWhenScrolledToEdge`.
+    public var scrollingExpandsWhenScrolledToEdge: Bool = true
     
     /// The view controller being presented by the sheet currently
     public var childViewController: UIViewController {
@@ -95,26 +136,69 @@ public class SheetViewController: UIViewController {
     
     public var blurEffect = SheetViewController.blurEffect {
         didSet {
-            self.blurView.effect = blurEffect
+            self.updateBlurEffect()
+        }
+    }
+
+    /// Default value for useLiquidGlassBackground. Defaults to false.
+    public static var useLiquidGlassBackground: Bool = false
+    /// On iOS 26+, render the blur background with a Liquid Glass (`UIGlassEffect`) material instead
+    /// of `blurEffect`. Has no effect below iOS 26, and defaults to false so the classic blur is
+    /// preserved unless explicitly opted in.
+    public var useLiquidGlassBackground = SheetViewController.useLiquidGlassBackground {
+        didSet {
+            self.updateBlurEffect()
         }
     }
     public static var allowGestureThroughOverlay: Bool = false
     public var allowGestureThroughOverlay: Bool = SheetViewController.allowGestureThroughOverlay {
         didSet {
-            self.overlayTapView.isUserInteractionEnabled = !self.allowGestureThroughOverlay
+            self.updateOverlayInteractivity()
+            self.updateAccessibility()
         }
     }
-    
+
+    /// The largest detent at which the overlay is left undimmed and (in inline / `presentOverWindow`
+    /// mode) lets touches pass through to the content behind — parity with
+    /// `UISheetPresentationController.largestUndimmedDetentIdentifier`. `nil` (default) always dims.
+    /// Note: under standard modal presentation the overlay undims but UIKit's presentation container
+    /// still intercepts the touches (use `presentOverWindow` for real pass-through).
+    public var largestUndimmedSize: SheetSize? {
+        didSet {
+            guard self.isViewLoaded else { return }
+            self.overlayView.alpha = self.dimmedOverlayAlpha
+            self.updateOverlayInteractivity()
+            self.updateAccessibility()
+        }
+    }
+
+    /// Target overlay dim alpha for the current detent (0 when it is within `largestUndimmedSize`).
+    private var dimmedOverlayAlpha: CGFloat {
+        guard let undimmed = self.largestUndimmedSize else { return 1 }
+        return self.height(for: self.currentSize) <= self.height(for: undimmed) + 0.5 ? 0 : 1
+    }
+
+    /// Whether overlay-region touches should pass through (via `allowGestureThroughOverlay` or an
+    /// undimmed detent).
+    private var overlayPassesThrough: Bool {
+        return self.allowGestureThroughOverlay || (self.largestUndimmedSize != nil && self.dimmedOverlayAlpha == 0)
+    }
+
+    private func updateOverlayInteractivity() {
+        self.overlayTapView.isUserInteractionEnabled = !self.overlayPassesThrough
+        if self.isViewLoaded {
+            self.view.accessibilityViewIsModal = !self.overlayPassesThrough
+        }
+    }
+
     public static var cornerRadius: CGFloat = 12
     public var cornerRadius: CGFloat {
         get { return self.contentViewController.cornerRadius }
         set { self.contentViewController.cornerRadius = newValue }
     }
 
-    @available(iOS 13.0, *)
     public static var cornerCurve: CALayerCornerCurve = .circular
 
-    @available(iOS 13.0, *)
     public var cornerCurve: CALayerCornerCurve {
         get { return self.contentViewController.cornerCurve }
         set { self.contentViewController.cornerCurve = newValue }
@@ -126,10 +210,19 @@ public class SheetViewController: UIViewController {
         set { self.contentViewController.gripSize = newValue }
     }
     
-    public static var gripColor: UIColor = UIColor(white: 0.868, black: 0.1)
+    public static var gripColor: UIColor = UIColor(white: 0.868, black: 0.5)
     public var gripColor: UIColor? {
         get { return self.contentViewController.gripColor }
         set { self.contentViewController.gripColor = newValue }
+    }
+
+    /// Default value for prefersGrabberVisible. Defaults to true.
+    public static var prefersGrabberVisible: Bool = true
+    /// Whether the grabber (grip) is shown on the pull bar. Defaults to true. (Parity with
+    /// UISheetPresentationController.prefersGrabberVisible.) Requires a pull bar (pullBarHeight > 0).
+    public var prefersGrabberVisible: Bool {
+        get { return !self.contentViewController.isGripHidden }
+        set { self.contentViewController.isGripHidden = !newValue }
     }
     
     public static var pullBarBackgroundColor: UIColor = UIColor.clear
@@ -149,25 +242,64 @@ public class SheetViewController: UIViewController {
     public var shouldDismiss: ((SheetViewController) -> Bool)?
     public var didDismiss: ((SheetViewController) -> Void)?
     public var sizeChanged: ((SheetViewController, SheetSize, CGFloat) -> Void)?
+    /// Called continuously (roughly once per frame) while the sheet's content height is changing —
+    /// during a drag AND during animated resizes/snaps — with a `SheetHeightProgress` the library
+    /// computes from its own detents (live height, overall fraction, reached detent, and per-detent
+    /// reveal). Unlike `sizeChanged` (which fires once per *settled* detent), this lets content
+    /// interpolate its own animations progressively in lockstep with the sheet, and reacts the moment
+    /// the height crosses a detent mid-drag. Fires on the main thread.
+    public var progressChanged: ((SheetViewController, SheetHeightProgress) -> Void)?
     public var panGestureShouldBegin: ((UIPanGestureRecognizer) -> Bool?)?
     
     public private(set) var contentViewController: SheetContentViewController
     var overlayView = UIView()
     var blurView = UIVisualEffectView()
     var overlayTapView = UIView()
-    var overflowView = UIView()
     var overlayTapGesture: UITapGestureRecognizer?
     private var contentViewHeightConstraint: NSLayoutConstraint!
+    private var contentTopConstraint: NSLayoutConstraint?
     
     /// The child view controller's scroll view we are watching so we can override the pull down/up to work on the sheet when needed
     private weak var childScrollView: UIScrollView?
     
     private var keyboardHeight: CGFloat = 0
     private var firstPanPoint: CGPoint = CGPoint.zero
-    private var panOffset: CGFloat = 0
     private var panGestureRecognizer: InitialTouchPanGestureRecognizer!
     private var prePanHeight: CGFloat = 0
-    private var isPanning: Bool = false
+    private var isPanning: Bool = false {
+        didSet {
+            // A drag (and the snap/dismiss/cancel animation that follows it, plus any re-grab) all
+            // keep isPanning true until the sheet finally settles, so this is the one place to
+            // begin/end progressive height tracking for the whole interaction.
+            guard isPanning != oldValue else { return }
+            if isPanning { self.beginHeightTracking() } else { self.endHeightTracking() }
+        }
+    }
+    /// Drives the progressive `progressChanged` callback by sampling the presentation layer each frame
+    /// while a drag or animated resize is in flight.
+    private var heightDisplayLink: CADisplayLink?
+    private var heightTrackingCount = 0
+    private var lastReportedHeight: CGFloat = -1
+    /// The in-flight detent snap animation, kept so a re-grab can interrupt it cleanly.
+    private var snapAnimator: UIViewPropertyAnimator?
+    /// The size the in-flight snap started from, so an interrupted snap can still report sizeChanged.
+    private var snapPreviousSize: SheetSize?
+    /// While a release snap animates, its destination height and travel direction. Used to clamp the
+    /// reported progress height monotonically toward the target so the underdamped snap spring's
+    /// overshoot/undershoot can't move `reachedIndex` past — or back across — the target detent
+    /// boundary (the content correct→revert→correct flicker on release).
+    private var snapTargetHeight: CGFloat?
+    private var snapIsUp: Bool = false
+    /// False until the sheet has finished its first appearance. While false, intrinsic-height
+    /// corrections (the first measurement refining as real bounds/safe-area settle) are applied
+    /// INSTANTLY so the sheet doesn't visibly resize just after it loads; genuine later content
+    /// changes still glide with the spring.
+    private var hasAppeared = false
+    /// True while the sheet is attached over a window via `presentOverWindow(...)`; it reuses the
+    /// subview-based lifecycle of inline mode without mutating the public `useInlineMode` option.
+    private var isWindowAttached = false
+    /// Whether the sheet manages its own view (inline option or window-attached) instead of being a UIKit modal.
+    private var usesInlinePresentation: Bool { return self.options.useInlineMode || self.isWindowAttached }
     
     public var contentBackgroundColor: UIColor? {
         get { self.contentViewController.contentBackgroundColor }
@@ -177,11 +309,7 @@ public class SheetViewController: UIViewController {
     public init(controller: UIViewController, sizes: [SheetSize] = [.intrinsic], options: SheetOptions? = nil) {
         let options = options ?? SheetOptions.default
         self.contentViewController = SheetContentViewController(childViewController: controller, options: options)
-        if #available(iOS 13.0, *) {
-            self.contentViewController.contentBackgroundColor = UIColor.systemBackground
-        } else {
-            self.contentViewController.contentBackgroundColor = UIColor.white
-        }
+        self.contentViewController.contentBackgroundColor = UIColor.systemBackground
         self.sizes = sizes.count > 0 ? sizes : [.intrinsic]
         self.options = options
         self.transition = SheetTransition(options: options)
@@ -189,10 +317,15 @@ public class SheetViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
         self.gripColor = SheetViewController.gripColor
         self.gripSize = SheetViewController.gripSize
+        self.prefersGrabberVisible = SheetViewController.prefersGrabberVisible
         self.pullBarBackgroundColor = SheetViewController.pullBarBackgroundColor
         self.cornerRadius = SheetViewController.cornerRadius
         self.updateOrderedSizes()
         self.modalPresentationStyle = .custom
+        // .custom is a non-fullscreen style, so UIKit does not transfer status-bar control to
+        // the presented VC by default; opt in so childForStatusBarStyle (and the child's
+        // preferredStatusBarStyle) is actually consulted during modal presentation.
+        self.modalPresentationCapturesStatusBarAppearance = true
         self.transitioningDelegate = self
     }
     
@@ -201,19 +334,18 @@ public class SheetViewController: UIViewController {
     }
     
     public override func loadView() {
-        if self.options.useInlineMode {
-            let sheetView = SheetView()
-            sheetView.delegate = self
-            self.view = sheetView
-        } else {
-            super.loadView()
-        }
+        // Use SheetView (which forwards point(inside:) so touches can pass through the overlay
+        // region) in every mode. In modal presentation with the default
+        // allowGestureThroughOverlay == false it behaves exactly like a plain UIView.
+        let sheetView = SheetView()
+        sheetView.delegate = self
+        self.view = sheetView
     }
     
     public override func viewDidLoad() {
         super.viewDidLoad()
         
-        self.compatibleAdditionalSafeAreaInsets = UIEdgeInsets(top: -self.options.pullBarHeight, left: 0, bottom: 0, right: 0)
+        self.additionalSafeAreaInsets = UIEdgeInsets(top: -self.options.pullBarHeight, left: 0, bottom: 0, right: 0)
         
         self.view.backgroundColor = UIColor.clear
         self.addPanGestureRecognizer()
@@ -221,15 +353,52 @@ public class SheetViewController: UIViewController {
         self.addBlurBackground()
         self.addContentView()
         self.addOverlayTapView()
+        // Keep VoiceOver inside the sheet (not the obscured presenter) unless pass-through is on.
+        self.view.accessibilityViewIsModal = !self.overlayPassesThrough
         self.registerKeyboardObservers()
         self.resize(to: self.sizes.first ?? .intrinsic, animated: false)
+
+        if self.allowGestureThroughOverlay && !self.usesInlinePresentation {
+            print("FittedSheets: allowGestureThroughOverlay has no effect under standard modal presentation because UIKit's presentation container intercepts the touches. Present the sheet with presentOverWindow(...) instead.")
+        }
     }
     
-    public override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
+    public override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        // viewIsAppearing runs with accurate bounds and trait collection (unlike viewWillAppear),
+        // so the geometry-dependent sizing computes correct heights on first presentation.
         self.updateOrderedSizes()
         self.contentViewController.updatePreferredHeight()
         self.resize(to: self.currentSize, animated: false)
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // The child's final first-appearance re-measure is forwarded during super above (still
+        // instant because hasAppeared is false); from here on, intrinsic changes animate.
+        self.hasAppeared = true
+    }
+
+    public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        guard self.isViewLoaded else { return }
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            guard let self = self, let constraint = self.contentViewHeightConstraint else { return }
+            // self.view.bounds is already the post-rotation size here, so height(for:) is correct.
+            self.updateOrderedSizes()
+            constraint.constant = self.height(for: self.currentSize)
+            self.view.layoutIfNeeded()
+        }, completion: { [weak self] _ in
+            guard let self = self else { return }
+            // Width changed -> intrinsic content height may differ; re-measure and settle.
+            self.contentViewController.updatePreferredHeight()
+            self.updateOrderedSizes()
+            self.resize(to: self.currentSize, animated: false)
+            // resize(animated:false) early-returns when the constant is unchanged (it was already set
+            // to the new post-rotation height above), so push the new geometry to progressChanged
+            // explicitly — otherwise consumers keep the pre-rotation progress until the next drag.
+            self.reportHeightIfChanged()
+        })
     }
     
     public override func viewWillDisappear(_ animated: Bool) {
@@ -238,13 +407,24 @@ public class SheetViewController: UIViewController {
     
     public override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        // Add a guard statement to prevent unexpected dismiss
-        guard presentedViewController == nil else { return }
+        // Only run dismissal side-effects on a real dismissal, not when the sheet
+        // itself presents a .fullScreen modal (which also triggers viewDidDisappear).
+        guard self.isBeingDismissed || self.presentingViewController == nil else { return }
+        // Safety net: the CADisplayLink retains self, so make sure it is gone on dismissal even if
+        // a tracking source didn't balance (it normally ends via isPanning / the resize completion).
+        self.tearDownHeightTracking()
+        // Reset so a reused sheet re-applies its first-appearance intrinsic refinement instantly.
+        self.hasAppeared = false
+        // Balance the static presenter cache regardless of the shrink option so a
+        // non-animated dismissal (e.g. pull-to-dismiss) can never leak the presenter.
+        if let presenter = self.transition.presenter, SheetOptions.shrinkingNestedPresentingViewControllers {
+            SheetTransition.currentPresenters.removeAll(where: { $0 == presenter })
+        }
         if let presenter = self.transition.presenter, self.options.shrinkPresentingViewController {
             self.transition.restorePresentor(presenter, completion: { _ in
                 self.didDismiss?(self)
             })
-        } else if !self.options.useInlineMode {
+        } else if !self.usesInlinePresentation {
             self.didDismiss?(self)
         }
     }
@@ -275,7 +455,7 @@ public class SheetViewController: UIViewController {
     }
     
     private func updateAccessibility() {
-        let isOverlayAccessable = !self.allowGestureThroughOverlay && (self.dismissOnOverlayTap || self.dismissOnPull)
+        let isOverlayAccessable = !self.overlayPassesThrough && (self.dismissOnOverlayTap || self.dismissOnPull)
         self.overlayTapView.isAccessibilityElement = isOverlayAccessable
         
         var pullBarLabel = ""
@@ -291,35 +471,52 @@ public class SheetViewController: UIViewController {
     
     private func addOverlay() {
         self.view.addSubview(self.overlayView)
-        Constraints(for: self.overlayView) {
-            $0.edges(.top, .left, .right, .bottom).pinToSuperview()
-        }
+        self.overlayView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            self.overlayView.topAnchor.constraint(equalTo: self.view.topAnchor),
+            self.overlayView.leftAnchor.constraint(equalTo: self.view.leftAnchor),
+            self.overlayView.rightAnchor.constraint(equalTo: self.view.rightAnchor),
+            self.overlayView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor)
+        ])
         self.overlayView.isUserInteractionEnabled = false
         self.overlayView.backgroundColor = self.hasBlurBackground ? .clear : self.overlayColor
     }
-    
+
     private func addBlurBackground() {
         self.overlayView.addSubview(self.blurView)
-        blurView.effect = blurEffect
-        Constraints(for: self.blurView) {
-            $0.edges(.top, .left, .right, .bottom).pinToSuperview()
-        }
+        self.updateBlurEffect()
+        self.blurView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            self.blurView.topAnchor.constraint(equalTo: self.overlayView.topAnchor),
+            self.blurView.leftAnchor.constraint(equalTo: self.overlayView.leftAnchor),
+            self.blurView.rightAnchor.constraint(equalTo: self.overlayView.rightAnchor),
+            self.blurView.bottomAnchor.constraint(equalTo: self.overlayView.bottomAnchor)
+        ])
         self.blurView.isUserInteractionEnabled = false
         self.blurView.isHidden = !self.hasBlurBackground
+    }
+
+    private func updateBlurEffect() {
+        if #available(iOS 26.0, *), self.useLiquidGlassBackground {
+            self.blurView.effect = UIGlassEffect()
+        } else {
+            self.blurView.effect = self.blurEffect
+        }
     }
     
     private func addOverlayTapView() {
         let overlayTapView = self.overlayTapView
         overlayTapView.backgroundColor = .clear
-        overlayTapView.isUserInteractionEnabled = !self.allowGestureThroughOverlay
+        overlayTapView.isUserInteractionEnabled = !self.overlayPassesThrough
         self.view.addSubview(overlayTapView)
         self.overlayTapView.accessibilityLabel = Localize.dismissPresentation.localized
-        Constraints(for: overlayTapView, self.contentViewController.view) {
-            $0.top.pinToSuperview()
-            $0.left.pinToSuperview()
-            $0.right.pinToSuperview()
-            $0.bottom.align(with: $1.top)
-        }
+        overlayTapView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            overlayTapView.topAnchor.constraint(equalTo: self.view.topAnchor),
+            overlayTapView.leftAnchor.constraint(equalTo: self.view.leftAnchor),
+            overlayTapView.rightAnchor.constraint(equalTo: self.view.rightAnchor),
+            overlayTapView.bottomAnchor.constraint(equalTo: self.contentViewController.view.topAnchor)
+        ])
         
         let tapGestureRecognizer = UITapGestureRecognizer(target: self, action: #selector(overlayTapped))
         self.overlayTapGesture = tapGestureRecognizer
@@ -327,35 +524,64 @@ public class SheetViewController: UIViewController {
     }
     
     @objc func overlayTapped(_ gesture: UITapGestureRecognizer) {
-        guard self.dismissOnOverlayTap else { return }
+        // A VoiceOver activation of the overlay element we labeled "Dismiss presentation"
+        // should honor dismissOnPull too; a real (sighted) overlay tap must still respect
+        // dismissOnOverlayTap only.
+        guard self.dismissOnOverlayTap
+            || (UIAccessibility.isVoiceOverRunning && self.dismissOnPull) else { return }
         self.attemptDismiss(animated: true)
     }
 
+    /// Standard VoiceOver two-finger "scrub" to dismiss.
+    public override func accessibilityPerformEscape() -> Bool {
+        guard self.dismissOnPull || self.dismissOnOverlayTap else { return false }
+        self.attemptDismiss(animated: true)
+        return true
+    }
+
     private func addContentView() {
-        self.contentViewController.willMove(toParent: self)
         self.addChild(self.contentViewController)
         self.view.addSubview(self.contentViewController.view)
         self.contentViewController.didMove(toParent: self)
         self.contentViewController.delegate = self
-        Constraints(for: self.contentViewController.view) {
-            $0.left.pinToSuperview().priority = UILayoutPriority(999)
-            $0.left.pinToSuperview(inset: self.options.horizontalPadding, relation: .greaterThanOrEqual)
-            if let maxWidth = self.options.maxWidth {
-                $0.width.set(maxWidth, relation: .lessThanOrEqual)
-            }
-            
-            $0.centerX.alignWithSuperview()
-            self.contentViewHeightConstraint = $0.height.set(self.height(for: self.currentSize))
-            
-            let top: CGFloat
-            if (self.options.useFullScreenMode) {
-                top = 0
-            } else {
-                top = max(12, UIApplication.shared.windows.first(where:  { $0.isKeyWindow })?.compatibleSafeAreaInsets.top ?? 12)
-            }
-            $0.bottom.pinToSuperview()
-            $0.top.pinToSuperview(inset: top, relation: .greaterThanOrEqual).priority = UILayoutPriority(999)
+        let contentView = self.contentViewController.view!
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+
+        // Prefer pinning to the left edge, but only softly so centerX/maxWidth can win.
+        let leftPreferred = contentView.leftAnchor.constraint(equalTo: self.view.leftAnchor)
+        leftPreferred.priority = UILayoutPriority(999)
+
+        let heightConstraint = contentView.heightAnchor.constraint(equalToConstant: self.height(for: self.currentSize))
+        self.contentViewHeightConstraint = heightConstraint
+
+        // self.view.window is nil during viewDidLoad, so seed a safe fallback and apply
+        // the real (scene-correct) inset later in viewSafeAreaInsetsDidChange.
+        let top: CGFloat = self.options.useFullScreenMode ? 0 : 12
+        let topConstraint = contentView.topAnchor.constraint(greaterThanOrEqualTo: self.view.topAnchor, constant: top)
+        topConstraint.priority = UILayoutPriority(999)
+        self.contentTopConstraint = topConstraint
+
+        var constraints: [NSLayoutConstraint] = [
+            leftPreferred,
+            contentView.leftAnchor.constraint(greaterThanOrEqualTo: self.view.leftAnchor, constant: self.options.horizontalPadding),
+            contentView.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+            heightConstraint,
+            contentView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+            topConstraint
+        ]
+        if let maxWidth = self.options.maxWidth {
+            constraints.append(contentView.widthAnchor.constraint(lessThanOrEqualToConstant: maxWidth))
         }
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    public override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        guard !self.options.useFullScreenMode else { return }
+        // Scene-correct + extension-safe: use the sheet's own window, not the deprecated
+        // UIApplication.shared.windows key-window scan.
+        let windowTop = self.view.window?.safeAreaInsets.top ?? 0
+        self.contentTopConstraint?.constant = max(12, windowTop)
     }
     
     private func addPanGestureRecognizer() {
@@ -369,7 +595,29 @@ public class SheetViewController: UIViewController {
         let point = gesture.translation(in: gesture.view?.superview)
         if gesture.state == .began {
             self.firstPanPoint = point
-            self.prePanHeight = self.contentViewController.view.bounds.height
+            let contentView = self.contentViewController.view!
+            // If a snap animation is still in flight, its model-layer bounds already hold the
+            // FINAL height while only the presentation layer is mid-transition. Read the height
+            // actually on screen, cancel the animator, and sync the constraint so the sheet does
+            // not jump under the finger on re-grab.
+            if let animator = self.snapAnimator, animator.isRunning {
+                let presentedHeight = contentView.layer.presentation()?.bounds.height ?? contentView.bounds.height
+                animator.stopAnimation(true)
+                self.snapAnimator = nil
+                self.snapTargetHeight = nil
+                contentView.transform = .identity
+                self.contentViewHeightConstraint.constant = max(0, presentedHeight)
+                self.view.layoutIfNeeded()
+                self.prePanHeight = presentedHeight
+                // stopAnimation(true) skips the animator's completion, so fire the interrupted
+                // snap's pending sizeChanged here (currentSize was already advanced to the target).
+                if let prev = self.snapPreviousSize, prev != self.currentSize {
+                    self.sizeChanged?(self, self.currentSize, self.height(for: self.currentSize))
+                }
+                self.snapPreviousSize = nil
+            } else {
+                self.prePanHeight = contentView.bounds.height
+            }
             self.isPanning = true
         }
         
@@ -403,7 +651,8 @@ public class SheetViewController: UIViewController {
                     self.contentViewController.view.transform = CGAffineTransform.identity
                     self.contentViewHeightConstraint.constant = self.height(for: self.currentSize)
                     self.transition.setPresentor(percentComplete: 0)
-                    self.overlayView.alpha = 1
+                    self.overlayView.alpha = self.dimmedOverlayAlpha
+                    self.view.layoutIfNeeded()
                 }, completion: { _ in
                     self.isPanning = false
                 })
@@ -422,7 +671,7 @@ public class SheetViewController: UIViewController {
             case .ended:
                 let velocity = (0.2 * gesture.velocity(in: self.view).y)
                 var finalHeight = newHeight - offset - velocity
-                if velocity > options.pullDismissThreshod {
+                if velocity > options.pullDismissThreshold {
                     // They swiped hard, always just close the sheet when they do
                     finalHeight = -1
                 }
@@ -443,60 +692,171 @@ public class SheetViewController: UIViewController {
                         self.transition.setPresentor(percentComplete: 1)
                         self.overlayView.alpha = 0
                     }, completion: { complete in
-                        self.attemptDismiss(animated: false)
+                        self.isPanning = false
+                        self.performDismiss(animated: false)   // shouldDismiss already evaluated in the guard above
                     })
                     return
                 }
                 
+                // `finalHeight` already accounts for release velocity (newHeight - offset - velocity),
+                // so snapping it to the nearest detent gives velocity-aware behavior *and* hysteresis:
+                // a tiny drag stays next to the current detent, while a hard flick reaches a neighbor.
                 var newSize = self.currentSize
-                if point.y < 0 {
-                    // We need to move to the next larger one
-                    newSize = self.orderedSizes.last ?? self.currentSize
-                    for size in self.orderedSizes.reversed() {
-                        if finalHeight < self.height(for: size) {
-                            newSize = size
-                        } else {
-                            break
-                        }
-                    }
-                } else {
-                    // We need to move to the next smaller one
-                    newSize = self.orderedSizes.first ?? self.currentSize
-                    for size in self.orderedSizes {
-                        if finalHeight > self.height(for: size) {
-                            newSize = size
-                        } else {
-                            break
-                        }
-                    }
+                if !self.orderedSizes.isEmpty {
+                    newSize = self.orderedSizes.min(by: {
+                        abs(self.height(for: $0) - finalHeight) < abs(self.height(for: $1) - finalHeight)
+                    }) ?? self.currentSize
                 }
                 let previousSize = self.currentSize
                 self.currentSize = newSize
                 
                 let newContentHeight = self.height(for: newSize)
-                UIView.animate(
-                    withDuration: animationDuration,
-                    delay: 0,
-                    usingSpringWithDamping: self.options.transitionDampening,
-                    initialSpringVelocity: self.options.transitionVelocity,
-                    options: self.options.transitionAnimationOptions,
-                    animations: {
+                // Interruptible spring snap: a UIViewPropertyAnimator lets a re-grab (handled in
+                // the .began branch) stop it mid-flight and continue from the on-screen position.
+                self.snapPreviousSize = previousSize
+                let damping = max(0.1, min(1.0, self.options.transitionDampening))
+                let timing = UISpringTimingParameters(dampingRatio: damping, initialVelocity: CGVector(dx: 0, dy: self.options.transitionVelocity))
+                let animator = UIViewPropertyAnimator(duration: animationDuration, timingParameters: timing)
+                let releaseHeight = self.contentViewHeightConstraint?.constant ?? newHeight
+                self.snapTargetHeight = newContentHeight
+                self.snapIsUp = newContentHeight >= releaseHeight
+                self.contentViewHeightConstraint.constant = newContentHeight
+                animator.addAnimations { [weak self] in
+                    guard let self = self else { return }
                     self.contentViewController.view.transform = CGAffineTransform.identity
-                    self.contentViewHeightConstraint.constant = newContentHeight
                     self.transition.setPresentor(percentComplete: 0)
-                    self.overlayView.alpha = 1
+                    self.overlayView.alpha = self.dimmedOverlayAlpha
                     self.view.layoutIfNeeded()
-                }, completion: { complete in
+                }
+                animator.addCompletion { [weak self] _ in
+                    guard let self = self else { return }
+                    self.snapAnimator = nil
+                    self.snapPreviousSize = nil
+                    self.snapTargetHeight = nil
                     self.isPanning = false
+                    // The detent may have crossed the largestUndimmedSize threshold, so re-derive
+                    // overlay interactivity/accessibility from the new size (matching resize()).
+                    self.updateOverlayInteractivity()
+                    self.updateAccessibility()
                     if previousSize != newSize {
                         self.sizeChanged?(self, newSize, newContentHeight)
                     }
-                })
+                }
+                self.snapAnimator = animator
+                animator.startAnimation()
             case .possible:
                 break
             @unknown default:
                 break // Do nothing
         }
+    }
+
+    // MARK: - Progressive height tracking
+
+    /// Start sampling the on-screen height each frame. Ref-counted so overlapping sources (a drag
+    /// and an animated resize) both keep it alive; a no-op when no `progressChanged` observer is set.
+    private func beginHeightTracking() {
+        guard self.progressChanged != nil else { return }
+        self.heightTrackingCount += 1
+        guard self.heightDisplayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(self.heightTrackingTick))
+        link.add(to: .main, forMode: .common)
+        self.heightDisplayLink = link
+    }
+
+    private func endHeightTracking() {
+        guard self.heightDisplayLink != nil else { return }
+        self.heightTrackingCount = max(0, self.heightTrackingCount - 1)
+        guard self.heightTrackingCount == 0 else { return }
+        self.heightDisplayLink?.invalidate()
+        self.heightDisplayLink = nil
+        self.reportHeightIfChanged() // deliver the final settled height
+    }
+
+    @objc private func heightTrackingTick() {
+        self.reportHeightIfChanged()
+    }
+
+    /// Forward the current content height if it moved since the last report. Reads the interpolated
+    /// presentation layer only while an animation is in flight (display link active); for one-shot
+    /// and settled reports it reads the model height, since the presentation layer still holds the
+    /// pre-layout on-screen value at the synchronous moment we sample it.
+    private func reportHeightIfChanged() {
+        guard let onChanged = self.progressChanged, let contentView = self.contentViewController.viewIfLoaded else { return }
+        let height: CGFloat
+        if self.heightDisplayLink != nil, let presented = contentView.layer.presentation()?.bounds.height {
+            if let target = self.snapTargetHeight {
+                // During a release snap the sheet's spring overshoots/undershoots the target detent.
+                // Pin the *reported* height monotonically to the target (using lastReportedHeight as
+                // the accumulator) so the content settles on the target detent once and can't flip
+                // back across it. The sheet's physical spring motion is unaffected.
+                height = self.snapIsUp
+                    ? min(target, max(self.lastReportedHeight, presented))
+                    : max(target, min(self.lastReportedHeight, presented))
+            } else {
+                // Mid-animation (drag / non-snap resize): the interpolated on-screen height.
+                height = presented
+            }
+        } else {
+            // Settled / one-shot: the height constraint's constant is the reliable target (the
+            // content view's own bounds can still be stale here, as its frame is resolved by its
+            // superview's layout pass which hasn't run yet).
+            height = self.contentViewHeightConstraint?.constant ?? contentView.bounds.height
+        }
+        guard abs(height - self.lastReportedHeight) >= 0.1 else { return }
+        self.lastReportedHeight = height
+        onChanged(self, self.makeProgress(height: height))
+    }
+
+    /// Compute the live progress across the sheet's defined detents. The library owns this math so
+    /// content never needs to know the detent heights.
+    private func makeProgress(height: CGFloat) -> SheetHeightProgress {
+        let sizeList = self.orderedSizes.isEmpty ? self.sizes : self.orderedSizes
+        // (size, height) sorted smallest → largest.
+        let ordered = sizeList.map { ($0, self.height(for: $0)) }.sorted { $0.1 < $1.1 }
+        guard let smallest = ordered.first, let largest = ordered.last else {
+            let step = SheetHeightProgress.Step(size: self.currentSize, height: height, reveal: 1)
+            return SheetHeightProgress(height: height, fraction: 0, reachedSize: self.currentSize, reachedIndex: 0, steps: [step])
+        }
+
+        let steps: [SheetHeightProgress.Step] = ordered.enumerated().map { index, entry in
+            let reveal: CGFloat
+            if index == 0 {
+                reveal = 1
+            } else {
+                let lower = ordered[index - 1].1
+                let span = entry.1 - lower
+                reveal = span > 0 ? min(1, max(0, (height - lower) / span)) : (height >= entry.1 ? 1 : 0)
+            }
+            return SheetHeightProgress.Step(size: entry.0, height: entry.1, reveal: reveal)
+        }
+
+        // Reached = the highest fully-revealed detent, derived from the same boundary as `reveal` so
+        // `reachedIndex`/`reachedSize` and `steps[i].reveal` can never disagree. Step 0 is always
+        // revealed, so this is at least 0.
+        var reachedIndex = 0
+        for (index, step) in steps.enumerated() where step.reveal >= 1 { reachedIndex = index }
+
+        let fullSpan = largest.1 - smallest.1
+        let fraction = fullSpan > 0 ? min(1, max(0, (height - smallest.1) / fullSpan)) : 0
+        return SheetHeightProgress(height: height, fraction: fraction, reachedSize: ordered[reachedIndex].0, reachedIndex: reachedIndex, steps: steps)
+    }
+
+    /// The sheet's current progress across its detents — the same value delivered to
+    /// `progressChanged`. Use it to seed content state before the first callback arrives.
+    public var currentProgress: SheetHeightProgress {
+        let height = self.contentViewHeightConstraint?.constant
+            ?? self.contentViewController.viewIfLoaded?.bounds.height
+            ?? 0
+        return self.makeProgress(height: height)
+    }
+
+    private func tearDownHeightTracking() {
+        self.heightDisplayLink?.invalidate()
+        self.heightDisplayLink = nil
+        self.heightTrackingCount = 0
+        // Reset so a reused sheet re-reports its first height on the next presentation.
+        self.lastReportedHeight = -1
     }
 
     private func registerKeyboardObservers() {
@@ -505,10 +865,20 @@ public class SheetViewController: UIViewController {
     }
     
     @objc func keyboardShown(_ notification: Notification) {
-        guard let info:[AnyHashable: Any] = notification.userInfo, let keyboardRect:CGRect = (info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
-        
-        let windowRect = self.view.convert(self.view.bounds, to: nil)
-        let actualHeight = windowRect.maxY - keyboardRect.origin.y
+        guard let info:[AnyHashable: Any] = notification.userInfo,
+              let keyboardRect:CGRect = (info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
+        // Ignore keyboards while our view is not in a window (detached / covered by a full-screen modal).
+        guard self.view.window != nil else { return }
+        // Ignore keyboards belonging to another app in iPad multitasking.
+        if let isLocal = info[UIResponder.keyboardIsLocalUserInfoKey] as? Bool, isLocal == false { return }
+
+        // Convert the keyboard frame from screen space into our view and take the real overlap;
+        // the previous window-vs-screen subtraction was wrong (and could go negative) whenever the
+        // window was offset from the screen origin (Split View / Stage Manager / inline mode).
+        let screenSpace: UICoordinateSpace? = self.view.window?.screen.coordinateSpace
+        let keyboardInView = screenSpace.map { self.view.convert(keyboardRect, from: $0) } ?? keyboardRect
+        let overlap = self.view.bounds.intersection(keyboardInView)
+        let actualHeight = overlap.isNull ? 0 : max(0, overlap.height)
         self.adjustForKeyboard(height: actualHeight, from: notification)
     }
     
@@ -517,13 +887,23 @@ public class SheetViewController: UIViewController {
     }
     
     private func adjustForKeyboard(height: CGFloat, from notification: Notification) {
+        // Even when keyboard avoidance is disabled, clear an inset a prior keyboard left applied
+        // (e.g. autoAdjustToKeyboard was toggled off while the keyboard was up, or a shrinking
+        // frame was missed while the sheet was off-window). Otherwise height(for: .intrinsic) keeps
+        // adding a stale keyboardHeight and the sheet stays permanently oversized. Scoped to a real
+        // pending inset so a deliberately-disabled sheet is left untouched.
+        if height == 0, !self.autoAdjustToKeyboard, self.keyboardHeight != 0 {
+            self.keyboardHeight = 0
+            self.contentViewController.adjustForKeyboard(height: 0)
+            self.resize(to: self.currentSize, animated: false)
+        }
         guard self.autoAdjustToKeyboard, let info:[AnyHashable: Any] = notification.userInfo else { return }
         self.keyboardHeight = height
         
         let duration:TimeInterval = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0
         let animationCurveRawNSN = info[UIResponder.keyboardAnimationCurveUserInfoKey] as? NSNumber
         let animationCurveRaw = animationCurveRawNSN?.uintValue ?? UIView.AnimationOptions.curveEaseInOut.rawValue
-        let animationCurve:UIView.AnimationOptions = UIView.AnimationOptions(rawValue: animationCurveRaw)
+        let animationCurve:UIView.AnimationOptions = UIView.AnimationOptions(rawValue: animationCurveRaw << 16)
         
         self.contentViewController.adjustForKeyboard(height: self.keyboardHeight)
         self.resize(to: self.currentSize, duration: duration, options: animationCurve, animated: true, complete: {
@@ -535,10 +915,22 @@ public class SheetViewController: UIViewController {
         guard let size = size else { return 0 }
         let contentHeight: CGFloat
         let fullscreenHeight: CGFloat
-        if self.options.useFullScreenMode {
-            fullscreenHeight = self.view.bounds.height - self.minimumSpaceAbovePullBar
+        // Avoid forcing a view load (and the child's viewDidLoad) if callers query sizes
+        // before presentation; fall back to the key window / screen bounds when unloaded.
+        let bounds: CGRect
+        let safeAreaTop: CGFloat
+        if self.isViewLoaded {
+            bounds = self.view.bounds
+            safeAreaTop = self.view.safeAreaInsets.top
         } else {
-            fullscreenHeight = self.view.bounds.height - self.view.compatibleSafeAreaInsets.top - self.minimumSpaceAbovePullBar
+            let keyWindow = UIApplication.shared.fs_keyWindow
+            bounds = keyWindow?.bounds ?? UIScreen.main.bounds
+            safeAreaTop = keyWindow?.safeAreaInsets.top ?? 0
+        }
+        if self.options.useFullScreenMode {
+            fullscreenHeight = bounds.height - self.minimumSpaceAbovePullBar
+        } else {
+            fullscreenHeight = bounds.height - safeAreaTop - self.minimumSpaceAbovePullBar
         }
         switch (size) {
             case .fixed(let height):
@@ -551,15 +943,16 @@ public class SheetViewController: UIViewController {
                 if (percent > 1) {
                     debugPrint("Size percent should be less than or equal to 1.0, but was set to \(percent))")
                 }
-                contentHeight = (self.view.bounds.height) * CGFloat(percent) + self.keyboardHeight
+                contentHeight = bounds.height * percent + self.keyboardHeight
             case .marginFromTop(let margin):
-                contentHeight = (self.view.bounds.height) - margin + self.keyboardHeight
+                contentHeight = bounds.height - margin + self.keyboardHeight
         }
-        return min(fullscreenHeight, contentHeight)
+        return max(0, min(fullscreenHeight, contentHeight))
     }
 
     // https://medium.com/thoughts-on-thoughts/recreating-apple-s-rubber-band-effect-in-swift-dbf981b40f35
     private func logConstraintValueForYPosition(verticalLimit: CGFloat, yPosition : CGFloat) -> CGFloat {
+      guard verticalLimit > 0 else { return verticalLimit }
       return verticalLimit * (1 + log10(yPosition/verticalLimit))
     }
     
@@ -567,35 +960,61 @@ public class SheetViewController: UIViewController {
                        duration: TimeInterval = 0.2,
                        options: UIView.AnimationOptions = [.curveEaseOut],
                        animated: Bool = true,
+                       dampingRatio: CGFloat? = nil,
+                       initialVelocity: CGFloat = 0,
                        complete: (() -> Void)? = nil) {
-        
+
         let previousSize = self.currentSize
         self.currentSize = size
-        
+
         let oldConstraintHeight = self.contentViewHeightConstraint.constant
-        
+
         let newHeight = self.height(for: size)
-        
+
         guard oldConstraintHeight != newHeight else {
+            // Height unchanged, but the logical size may have; still honor the callback contract.
+            if previousSize != size, newHeight > 0 {
+                self.sizeChanged?(self, size, newHeight)
+            }
+            complete?()
             return
         }
-        
+
         if animated {
-            UIView.animate(withDuration: duration, delay: 0, options: options, animations: { [weak self] in
+            let animations = { [weak self] in
                 guard let self = self, let constraint = self.contentViewHeightConstraint else { return }
                 constraint.constant = newHeight
+                self.overlayView.alpha = self.dimmedOverlayAlpha
                 self.view.layoutIfNeeded()
-            }, completion: { _ in
-                if previousSize != size {
+            }
+            let completion: (Bool) -> Void = { _ in
+                self.endHeightTracking()
+                self.updateOverlayInteractivity()
+                if previousSize != size, newHeight > 0 {
                     self.sizeChanged?(self, size, newHeight)
                 }
-                self.contentViewController.updateAfterLayout()
                 complete?()
-            })
+            }
+            // Sample the presentation layer each frame so `progressChanged` fires progressively as
+            // the constraint animates, not just once at the end.
+            self.beginHeightTracking()
+            // A spring settle (dampingRatio set) reads as smooth rather than snappy; used for the
+            // intrinsic auto-resize. Everything else keeps the timing-curve animation.
+            if let dampingRatio = dampingRatio {
+                UIView.animate(withDuration: duration, delay: 0, usingSpringWithDamping: dampingRatio, initialSpringVelocity: initialVelocity, options: options, animations: animations, completion: completion)
+            } else {
+                UIView.animate(withDuration: duration, delay: 0, options: options, animations: animations, completion: completion)
+            }
         } else {
             UIView.performWithoutAnimation {
-                self.contentViewHeightConstraint?.constant = self.height(for: size)
+                self.contentViewHeightConstraint?.constant = newHeight
+                self.overlayView.alpha = self.dimmedOverlayAlpha
                 self.contentViewController.view.layoutIfNeeded()
+            }
+            self.updateOverlayInteractivity()
+            self.reportHeightIfChanged()
+            if previousSize != size, newHeight > 0 {
+                self.sizeChanged?(self, size, newHeight)
             }
             complete?()
         }
@@ -603,33 +1022,90 @@ public class SheetViewController: UIViewController {
     
     public func attemptDismiss(animated: Bool) {
         if self.shouldDismiss?(self) != false {
-            if self.options.useInlineMode {
-                if animated {
-                    self.animateOut {
-                        self.didDismiss?(self)
-                    }
-                } else {
-                    self.view.removeFromSuperview()
-                    self.removeFromParent()
+            self.performDismiss(animated: animated)
+        }
+    }
+
+    /// Performs the dismissal without re-consulting `shouldDismiss` (the caller is responsible
+    /// for having evaluated it exactly once).
+    private func performDismiss(animated: Bool) {
+        if self.usesInlinePresentation {
+            if animated {
+                self.animateOut {
                     self.didDismiss?(self)
                 }
             } else {
-                self.dismiss(animated: animated, completion: nil)
+                self.willMove(toParent: nil)
+                self.view.removeFromSuperview()
+                self.removeFromParent()
+                self.isWindowAttached = false
+                self.didDismiss?(self)
             }
+        } else {
+            self.dismiss(animated: animated, completion: nil)
         }
     }
     
     /// Recalculates the intrinsic height of the sheet based on the content, and updates the sheet height to match.
     ///
-    /// **Note:** Only meant for use with `.intrinsic` sheet size
+    /// **Note:** Only meant for use with the `.intrinsic` sheet size.
+    ///
+    /// The sheet re-measures automatically on appearance, rotation, Dynamic Type changes, and
+    /// navigation push/pop. It does **not** observe arbitrary content growth, so call this after
+    /// changes it can't detect, e.g.:
+    /// - the child's content grows after an async load, a `reloadData()`, or a late text/`isHidden` change;
+    /// - you toggle the child navigation bar's visibility or translucency on the *current* top view
+    ///   controller (no `willShow`/`didShow` fires, so the reserved bar height goes stale).
+    ///
+    /// Also note: `.intrinsic` children should pin bottom content to `safeAreaLayoutGuide.bottomAnchor`.
+    /// The card's bottom sits at the screen bottom, so content pinned to the raw `bottomAnchor` will
+    /// underlap the home indicator — the sheet reserves the bottom safe area only for children that
+    /// respect it.
     public func updateIntrinsicHeight() {
         contentViewController.updatePreferredHeight()
     }
     
     /// Animates the sheet in, but only if presenting using the inline mode
+    /// Presents the sheet attached over the app's key window instead of as a UIKit modal.
+    ///
+    /// Use this (rather than `UIViewController.present(_:animated:)`) when `allowGestureThroughOverlay`
+    /// is set: a standard modal cannot pass touches through, because UIKit's presentation container
+    /// view intercepts them. A window-attached sheet instead sits as a sibling over the current
+    /// content, so `SheetView.point(inside:)` can forward overlay-region touches straight through to
+    /// the app behind. Dismissal (overlay tap, pull-down, `attemptDismiss`) works as in inline mode.
+    ///
+    /// - Returns: `false` if no key window / root view controller could be found.
+    @discardableResult
+    public func presentOverWindow(_ window: UIWindow? = nil, size: SheetSize? = nil, duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) -> Bool {
+        guard let hostWindow = window ?? UIApplication.shared.fs_keyWindow,
+              let root = hostWindow.rootViewController else {
+            print("FittedSheets: presentOverWindow could not find a key window with a root view controller.")
+            return false
+        }
+        let parent = SheetViewController.topPresentedViewController(from: root)
+        // Route through the inline/window-attach machinery so overlay touches can pass through and
+        // dismissal uses the subview-removal path rather than UIKit modal dismissal. Use a private
+        // flag rather than mutating the public useInlineMode so the instance stays reusable.
+        self.isWindowAttached = true
+        self.animateIn(to: parent.view, in: parent, size: size, duration: duration, completion: completion)
+        return true
+    }
+
+    private static func topPresentedViewController(from vc: UIViewController) -> UIViewController {
+        var top = vc
+        while let presented = top.presentedViewController, !presented.isBeingDismissed {
+            top = presented
+        }
+        return top
+    }
+
     public func animateIn(to view: UIView, in parent: UIViewController, size: SheetSize? = nil, duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) {
-        
-        self.willMove(toParent: parent)
+        guard self.usesInlinePresentation else {
+            assertionFailure("animateIn(to:in:) requires SheetOptions.useInlineMode == true; use present(_:animated:) for modal presentation.")
+            completion?()
+            return
+        }
+
         parent.addChild(self)
         view.addSubview(self.view)
         self.didMove(toParent: parent)
@@ -645,9 +1121,10 @@ public class SheetViewController: UIViewController {
     }
     
     public func animateIn(size: SheetSize? = nil, duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) {
-        guard self.options.useInlineMode else { return }
+        guard self.usesInlinePresentation else { completion?(); return }
         guard self.view.superview != nil else {
             print("It appears your sheet is not set as a subview of another view. Make sure to add this view as a subview before trying to animate it in.")
+            completion?()
             return
         }
         self.view.superview?.layoutIfNeeded()
@@ -662,9 +1139,10 @@ public class SheetViewController: UIViewController {
             withDuration: duration,
             animations: {
                 contentView.transform = .identity
-                self.overlayView.alpha = 1
+                self.overlayView.alpha = self.dimmedOverlayAlpha
             },
             completion: { _ in
+                self.hasAppeared = true
                 completion?()
             }
         )
@@ -672,7 +1150,7 @@ public class SheetViewController: UIViewController {
     
     /// Animates the sheet out, but only if presenting using the inline mode
     public func animateOut(duration: TimeInterval = 0.3, completion: (() -> Void)? = nil) {
-        guard self.options.useInlineMode else { return }
+        guard self.usesInlinePresentation else { completion?(); return }
         let contentView = self.contentViewController.view!
         
         UIView.animate(
@@ -686,18 +1164,70 @@ public class SheetViewController: UIViewController {
                 self.overlayView.alpha = 0
             },
             completion: { _ in
+                self.willMove(toParent: nil)
                 self.view.removeFromSuperview()
                 self.removeFromParent()
+                self.isWindowAttached = false
+                self.hasAppeared = false
                 completion?()
             }
         )
     }
 }
 
+// MARK: - Async / await presentation
+
+extension SheetViewController {
+    /// Presents the sheet modally from `presenter` and returns once the entry animation completes.
+    public func present(from presenter: UIViewController, animated: Bool = true) async {
+        await withCheckedContinuation { continuation in
+            presenter.present(self, animated: animated) {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Window-attach presentation (see `presentOverWindow`) that returns once the entry animation
+    /// completes. Returns `false` if no key window with a root view controller could be found.
+    @discardableResult
+    public func presentOverWindow(_ window: UIWindow? = nil, size: SheetSize? = nil, duration: TimeInterval = 0.3) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let started = self.presentOverWindow(window, size: size, duration: duration) {
+                continuation.resume(returning: true)
+            }
+            if !started {
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    /// Inline/window-attach animate-in that returns once the animation completes.
+    public func animateIn(to view: UIView, in parent: UIViewController, size: SheetSize? = nil, duration: TimeInterval = 0.3) async {
+        await withCheckedContinuation { continuation in
+            self.animateIn(to: view, in: parent, size: size, duration: duration) {
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Inline/window-attach animate-out that returns once the animation completes.
+    public func animateOut(duration: TimeInterval = 0.3) async {
+        await withCheckedContinuation { continuation in
+            self.animateOut(duration: duration) {
+                continuation.resume()
+            }
+        }
+    }
+}
+
 extension SheetViewController: SheetViewDelegate {
     func sheetPoint(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        let isInOverlay = self.overlayTapView.bounds.contains(point)
-        if self.allowGestureThroughOverlay, isInOverlay {
+        guard self.overlayPassesThrough else { return true }
+        // Keep only touches on the sheet content card; let everything else (the dimmed overlay,
+        // including the side gutters when maxWidth/horizontalPadding narrows the card) pass through.
+        // `point` and the content frame are both in this view's coordinate space.
+        let isOverContent = self.contentViewController.view.frame.contains(point)
+        if !isOverContent {
             return false
         } else {
             return true
@@ -717,14 +1247,15 @@ extension SheetViewController: UIGestureRecognizerDelegate {
     }
     
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let panGestureRecognizer = gestureRecognizer as? InitialTouchPanGestureRecognizer, let childScrollView = self.childScrollView, let point = panGestureRecognizer.initialTouchLocation else { return true }
-        
+        // Consult the public closure first so it works even without a registered child scroll view.
         if let pan = gestureRecognizer as? UIPanGestureRecognizer, let closure = panGestureShouldBegin, let should = closure(pan) {
             return should
         }
-        
+
+        guard let panGestureRecognizer = gestureRecognizer as? InitialTouchPanGestureRecognizer, let childScrollView = self.childScrollView, let point = panGestureRecognizer.initialTouchLocation else { return true }
+
         let pointInChildScrollView = self.view.convert(point, to: childScrollView).y - childScrollView.contentOffset.y
-        
+
         let velocity = panGestureRecognizer.velocity(in: panGestureRecognizer.view?.superview)
         guard pointInChildScrollView > 0, pointInChildScrollView < childScrollView.bounds.height else {
             if keyboardHeight > 0 {
@@ -732,11 +1263,13 @@ extension SheetViewController: UIGestureRecognizerDelegate {
             }
             return true
         }
-        let topInset = childScrollView.contentInset.top
+        // Resting content offset under the default inset-adjustment behavior is -adjustedContentInset.top.
+        let topInset = childScrollView.adjustedContentInset.top
         
         guard abs(velocity.y) > abs(velocity.x), childScrollView.contentOffset.y <= -topInset else { return false }
         
         if velocity.y < 0 {
+            guard self.scrollingExpandsWhenScrolledToEdge else { return false }
             let containerHeight = height(for: self.currentSize)
             return height(for: self.orderedSizes.last) > containerHeight && containerHeight < height(for: SheetSize.fullscreen)
         } else {
@@ -749,7 +1282,7 @@ extension SheetViewController: SheetContentViewDelegate {
     func pullBarTapped() {
         // Tapping the pull bar is just for accessibility
         guard UIAccessibility.isVoiceOverRunning else { return }
-        let shouldDismiss = self.allowGestureThroughOverlay && (self.dismissOnOverlayTap || self.dismissOnPull)
+        let shouldDismiss = self.overlayPassesThrough && (self.dismissOnOverlayTap || self.dismissOnPull)
         guard !shouldDismiss else {
             self.attemptDismiss(animated: true)
             return
@@ -765,13 +1298,32 @@ extension SheetViewController: SheetContentViewDelegate {
         }
     }
     
-    func preferredHeightChanged(oldHeight: CGFloat, newSize: CGFloat) {
+    func preferredHeightChanged(oldHeight: CGFloat, newHeight: CGFloat) {
+        // A single presentation re-measures 4-5x, usually producing the identical height. Skip the
+        // propagation work when nothing changed; ordered-size and accessibility updates are still
+        // driven on their own paths (sizes didSet, viewIsAppearing, rotation), and keyboard resizes
+        // bypass this callback entirely, so no needed update is lost.
+        guard abs(oldHeight - newHeight) > 0.5 else { return }
         if self.sizes.contains(.intrinsic) {
             self.updateOrderedSizes()
         }
-        // If our intrinsic size changed and that is what we are sized to currently, use that
+        // If our intrinsic size changed and that is what we are sized to currently, use that.
+        // Animate with a gentle spring (blending from the current state so back-to-back changes,
+        // e.g. a nav push/pop, glide rather than snap) — the detent-snap/keyboard/rotation paths
+        // keep their own tuned timing. Deliberately NOT .allowUserInteraction: this uses
+        // UIView.animate (not the interruptible snap animator), so letting a pan begin mid-spring
+        // would capture the final model height and jump under the finger.
         if self.currentSize == .intrinsic, !self.isPanning {
-            self.resize(to: .intrinsic)
+            if self.hasAppeared {
+                self.resize(to: .intrinsic,
+                            duration: self.intrinsicTransitionDuration,
+                            options: [.beginFromCurrentState],
+                            dampingRatio: self.intrinsicTransitionDampening)
+            } else {
+                // Still settling into the first presentation: apply the refined measurement instantly
+                // (absorbed into the present transition) so the sheet doesn't visibly nudge after it appears.
+                self.resize(to: .intrinsic, animated: false)
+            }
         }
     }
 }
@@ -788,4 +1340,4 @@ extension SheetViewController: UIViewControllerTransitioningDelegate {
     }
 }
 
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)

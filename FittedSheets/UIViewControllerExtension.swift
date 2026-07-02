@@ -6,7 +6,7 @@
 //  Copyright © 2018 Gordon Tucker. All rights reserved.
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
 
 extension UIViewController {
@@ -24,4 +24,4 @@ extension UIViewController {
     }
 }
 
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)

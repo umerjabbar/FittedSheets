@@ -6,7 +6,7 @@
 //  Copyright © 2020 Gordon Tucker. All rights reserved.
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
 
 class SheetView: UIView {
@@ -18,4 +18,4 @@ class SheetView: UIView {
     }
 }
 
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)

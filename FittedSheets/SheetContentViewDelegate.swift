@@ -6,12 +6,13 @@
 //  Copyright © 2020 Gordon Tucker. All rights reserved.
 //
 
-#if os(iOS) || os(tvOS) || os(watchOS)
+#if os(iOS)
 import UIKit
 
+@MainActor
 protocol SheetContentViewDelegate: AnyObject {
-    func preferredHeightChanged(oldHeight: CGFloat, newSize: CGFloat)
+    func preferredHeightChanged(oldHeight: CGFloat, newHeight: CGFloat)
     func pullBarTapped()
 }
 
-#endif // os(iOS) || os(tvOS) || os(watchOS)
+#endif // os(iOS)
