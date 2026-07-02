@@ -36,3 +36,51 @@ class BlurDemo: SimpleDemo {
         }
     }
 }
+
+/// Demonstrates `allowGestureThroughOverlay` under modal-style usage via `presentOverWindow()`.
+/// The buttons visible through the dimmed overlay above the sheet remain tappable, because the
+/// sheet is attached over the window (a sibling of the app content) rather than presented as a
+/// blocking UIKit modal.
+class PassThroughOverlayDemo: UIViewController, Demoable {
+    class var name: String { "Pass-through overlay (window)" }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        if #available(iOS 13.0, *) {
+            self.view.backgroundColor = .systemBackground
+        } else {
+            self.view.backgroundColor = .white
+        }
+
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.text = "allowGestureThroughOverlay + presentOverWindow()\n\nThe demo buttons showing through the dimmed area above are still tappable — the sheet is attached over the window, not presented as a blocking modal.\n\nPull down to dismiss."
+        label.translatesAutoresizingMaskIntoConstraints = false
+        self.view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: self.view.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: self.view.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: self.view.trailingAnchor, constant: -24)
+        ])
+    }
+
+    class func openDemo(from parent: UIViewController, in view: UIView?) {
+        let controller = PassThroughOverlayDemo()
+
+        let sheet = SheetViewController(controller: controller, sizes: [.percent(0.4)])
+        sheet.allowGestureThroughOverlay = true
+        sheet.cornerRadius = 20
+
+        addSheetEventLogging(to: sheet)
+
+        if let view = view {
+            // Inline mode already supports pass-through.
+            sheet.animateIn(to: view, in: parent)
+        } else {
+            // Window-attach so overlay-region touches reach the app behind (a standard modal cannot).
+            sheet.presentOverWindow()
+        }
+    }
+}

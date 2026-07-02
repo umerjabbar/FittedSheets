@@ -16,9 +16,12 @@ class SimpleDemo: UIViewController, Demoable {
         super.viewDidLoad()
         
         let label = UILabel()
-        self.view.addSubview(label) {
-            $0.center.alignWithSuperview()
-        }
+        self.view.addSubview(label)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: self.view.centerYAnchor)
+        ])
         label.text = "Demo Text"
         label.textAlignment = .center
         label.textColor = UIColor.red

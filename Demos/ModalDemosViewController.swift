@@ -13,30 +13,7 @@ class ModalDemosViewController: UIViewController {
     @IBOutlet var stackView: UIStackView!
     @IBOutlet var scrollView: UIScrollView!
     
-    var demos: [(UIViewController & Demoable).Type] = [
-        OnlyCloseWithButtonDemo.self,
-        ResizingDemo.self,
-        NavigationDemo.self,
-        ScrollViewDemo.self,
-        TableViewDemo.self,
-        TableViewControllerDemo.self,
-        ScrollInNavigationDemo.self,
-        KeyboardDemo.self,
-        IntrinsicDemo.self,
-        IntrinsicInNavigationDemo.self,
-        IntrinsicAndFullscreenDemo.self,
-        IntrinsicAndTrueFullscreenDemo.self,
-        ColorDemo.self,
-        NoPullBarDemo.self,
-        ClearPullBarDemo.self,
-        MaxMinHeightDemo.self,
-        HorizontalPaddingDemo.self,
-        MaxWidthDemo.self,
-        BlurDemo.self,
-        NestedSheetsDemo.self,
-        RubberBandDemo.self,
-        CornerCurveDemo.self
-    ].sorted(by: { $0.name < $1.name })
+    var demos: [(UIViewController & Demoable).Type] = DemoRegistry.modalDemos
     
     override func viewDidLoad() {
         super.viewDidLoad()

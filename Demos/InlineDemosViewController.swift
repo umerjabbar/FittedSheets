@@ -35,7 +35,8 @@ class InlineDemosViewController: UIViewController {
         HorizontalPaddingDemo.self,
         MaxWidthDemo.self,
         BlurDemo.self,
-        CornerCurveDemo.self
+        CornerCurveDemo.self,
+        AdaptiveContentDemo.self
     ]
     
     override func viewDidLoad() {
