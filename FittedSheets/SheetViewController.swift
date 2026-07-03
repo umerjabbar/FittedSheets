@@ -718,15 +718,19 @@ public class SheetViewController: UIViewController {
                 let releaseHeight = self.contentViewHeightConstraint?.constant ?? newHeight
                 let isUp = newContentHeight >= releaseHeight
                 let snapsToMax = newContentHeight >= self.height(for: .fullscreen) - 0.5
+                let snapsToMin = newContentHeight <= self.height(for: self.orderedSizes.first) + 0.5
                 let timing: UITimingCurveProvider
                 let snapDuration: TimeInterval
-                if isUp && snapsToMax {
-                    // Snapping *up* to the max detent, a spring is wrong both ways: underdamped it
-                    // overshoots past the top of the screen and bounces; critically damped it eases in
-                    // slowly, so on release the sheet appears to hang at the dragged-down position for a
-                    // beat before rising ("pulled down, then springs back up"). A decelerating ease-out
-                    // starts moving immediately on release and settles at fullscreen with no overshoot.
-                    // Use a shorter duration than the default snap so it feels snappy, not floaty.
+                if (isUp && snapsToMax) || (!isUp && snapsToMin) {
+                    // No overshoot when snapping to an extreme detent — a spring is wrong at both ends:
+                    //  • Up to the max: underdamped it overshoots past the top of the screen and bounces;
+                    //    critically damped it eases in slowly so the sheet hangs at the dragged position
+                    //    before rising ("pulled down, then springs back up").
+                    //  • Down to the min: it overshoots *shorter* than the content can fit, breaking the
+                    //    collapsed layout — which also re-measures the intrinsic height and fires a
+                    //    competing resize, so the collapse reads as a jerk.
+                    // A decelerating ease-out starts moving immediately and settles cleanly at the
+                    // detent from either direction; mid-detent snaps keep the springy feel.
                     timing = UICubicTimingParameters(animationCurve: .easeOut)
                     snapDuration = max(0.14, animationDuration * 0.6)
                 } else {
