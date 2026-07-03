@@ -676,7 +676,7 @@ public class SheetViewController: UIViewController {
                     finalHeight = -1
                 }
                 
-                let animationDuration = TimeInterval(abs(velocity*0.0002) + 0.2)
+                let animationDuration = TimeInterval(abs(velocity*0.0002) + 0.1)
                 
                 guard finalHeight > 0 || !(self.dismissOnPull && self.shouldDismiss?(self) ?? true) else {
                     // Dismiss
@@ -715,11 +715,27 @@ public class SheetViewController: UIViewController {
                 // the .began branch) stop it mid-flight and continue from the on-screen position.
                 self.snapPreviousSize = previousSize
                 let damping = max(0.1, min(1.0, self.options.transitionDampening))
-                let timing = UISpringTimingParameters(dampingRatio: damping, initialVelocity: CGVector(dx: 0, dy: self.options.transitionVelocity))
-                let animator = UIViewPropertyAnimator(duration: animationDuration, timingParameters: timing)
                 let releaseHeight = self.contentViewHeightConstraint?.constant ?? newHeight
+                let isUp = newContentHeight >= releaseHeight
+                let snapsToMax = newContentHeight >= self.height(for: .fullscreen) - 0.5
+                let timing: UITimingCurveProvider
+                let snapDuration: TimeInterval
+                if isUp && snapsToMax {
+                    // Snapping *up* to the max detent, a spring is wrong both ways: underdamped it
+                    // overshoots past the top of the screen and bounces; critically damped it eases in
+                    // slowly, so on release the sheet appears to hang at the dragged-down position for a
+                    // beat before rising ("pulled down, then springs back up"). A decelerating ease-out
+                    // starts moving immediately on release and settles at fullscreen with no overshoot.
+                    // Use a shorter duration than the default snap so it feels snappy, not floaty.
+                    timing = UICubicTimingParameters(animationCurve: .easeOut)
+                    snapDuration = max(0.14, animationDuration * 0.6)
+                } else {
+                    timing = UISpringTimingParameters(dampingRatio: damping, initialVelocity: CGVector(dx: 0, dy: self.options.transitionVelocity))
+                    snapDuration = animationDuration
+                }
+                let animator = UIViewPropertyAnimator(duration: snapDuration, timingParameters: timing)
                 self.snapTargetHeight = newContentHeight
-                self.snapIsUp = newContentHeight >= releaseHeight
+                self.snapIsUp = isUp
                 self.contentViewHeightConstraint.constant = newContentHeight
                 animator.addAnimations { [weak self] in
                     guard let self = self else { return }
@@ -1333,7 +1349,7 @@ extension SheetViewController: UIViewControllerTransitioningDelegate {
         transition.presenting = true
         return transition
     }
-    
+
     public func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
         transition.presenting = false
         return transition
